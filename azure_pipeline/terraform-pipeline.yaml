@@ -1,0 +1,113 @@
+# Infrastructure CI/CD Pipeline
+
+parameters:
+- name: environment
+  displayName: Environment to deploy
+  type: string
+  default: 'dev'
+  values:
+  - 'dev'
+  - 'prod'
+- name: terraformAction
+  displayName: Terraform Action
+  type: string
+  default: 'plan'
+  values:
+  - 'plan'
+  - 'apply'
+
+trigger:
+  branches:
+    include:
+    - main
+  paths:
+    include:
+    - modules/**
+    - project/**
+    - environments/**
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+- stage: TerraformPlan
+  displayName: 'Terraform Plan'
+  jobs:
+  - job: TerraformPlan
+    displayName: 'Run Terraform Plan'
+    steps:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '3.9'
+        addToPath: true
+        
+    - task: TerraformInstaller@0
+      inputs:
+        terraformVersion: '1.5.7'
+    
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'Azure-Service-Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          cd environments/${{ parameters.environment }}
+          terraform init
+          terraform validate
+          terraform plan -out=tfplan
+      displayName: 'Terraform Plan'
+      
+    - task: PublishPipelineArtifact@1
+      inputs:
+        targetPath: 'environments/${{ parameters.environment }}/tfplan'
+        artifact: 'tfplan'
+        publishLocation: 'pipeline'
+      displayName: 'Publish Terraform Plan'
+
+- stage: TerraformApply
+  displayName: 'Terraform Apply'
+  dependsOn: TerraformPlan
+  condition: and(succeeded(), eq('${{ parameters.terraformAction }}', 'apply'))
+  jobs:
+  - job: DeployApproval
+    displayName: 'Approval for Terraform Apply'
+    pool: server
+    timeoutInMinutes: 4320 # 3 days
+    steps:
+    - task: ManualValidation@0
+      inputs:
+        notifyUsers: ''
+        instructions: 'Please approve the deployment to ${{ parameters.environment }}'
+        onTimeout: 'reject'
+  
+  - job: TerraformApply
+    displayName: 'Run Terraform Apply'
+    dependsOn: DeployApproval
+    steps:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '3.9'
+        addToPath: true
+        
+    - task: TerraformInstaller@0
+      inputs:
+        terraformVersion: '1.5.7'
+    
+    - task: DownloadPipelineArtifact@2
+      inputs:
+        buildType: 'current'
+        artifactName: 'tfplan'
+        targetPath: 'environments/${{ parameters.environment }}'
+      displayName: 'Download Terraform Plan'
+      
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'Azure-Service-Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          cd environments/${{ parameters.environment }}
+          terraform init
+          terraform apply -auto-approve tfplan
+      displayName: 'Terraform Apply'
+
